@@ -9,6 +9,7 @@ import { corsOrigin } from './config/cors.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { authRoutes } from './routes/authRoutes.js';
 import { pdfBatchRoutes } from './routes/pdfBatchRoutes.js';
+import auditLogRoutes from './routes/auditLogRoutes.js';
 
 export const app = express();
 
@@ -36,5 +37,6 @@ app.use(
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/api/auth', authRoutes);
 app.use('/api/pdf-batches', pdfBatchRoutes);
+app.use('/api/audit-logs', auditLogRoutes);
 app.use(notFound);
 app.use(errorHandler);

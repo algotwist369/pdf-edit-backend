@@ -26,3 +26,10 @@ export const requireAuth = asyncHandler(async (req, _res, next) => {
   req.user = user;
   next();
 });
+
+export const requireAdmin = asyncHandler(async (req, _res, next) => {
+  if (req.user.role !== 'admin') {
+    throw new AppError('Admin access required', 403, 'admin_required');
+  }
+  next();
+});

@@ -7,6 +7,7 @@ import { PdfFile } from '../models/PdfFile.js';
 import { ProcessingJob } from '../models/ProcessingJob.js';
 import { ReplacementResult } from '../models/ReplacementResult.js';
 import { ReplacementRule } from '../models/ReplacementRule.js';
+import { AuditLog } from '../models/AuditLog.js';
 import { enqueuePdfBatch, pausePdfBatch, resumePdfBatch, cancelPdfBatch } from '../queues/pdfBatchQueue.js';
 import { emitBatchStatus } from '../realtime/socket.js';
 import { buildBatchStatusPayload } from '../services/batchStatusService.js';
@@ -94,6 +95,17 @@ export const uploadBatch = asyncHandler(async (req, res) => {
       })
     );
   }
+
+  // Create audit log for batch upload
+  await AuditLog.create({
+    userId: req.user._id,
+    batchId: batch._id,
+    action: 'batch.uploaded',
+    metadata: {
+      fileName: batch.name,
+      fileCount: files.length
+    }
+  });
 
   res.status(201).json({ batch, files: createdFiles });
 });
