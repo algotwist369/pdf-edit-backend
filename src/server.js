@@ -8,6 +8,9 @@ import { startStorageCleanup } from './services/storage/storageCleanupService.js
 
 await connectDb();
 const httpServer = http.createServer(app);
+httpServer.requestTimeout = env.requestTimeoutMs;
+httpServer.keepAliveTimeout = env.keepAliveTimeoutMs;
+httpServer.headersTimeout = env.headersTimeoutMs;
 await initRealtime(httpServer);
 startInMemoryQueue();
 startStorageCleanup();

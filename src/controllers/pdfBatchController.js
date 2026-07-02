@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import pLimit from 'p-limit';
 import { PDFDocument, rgb } from 'pdf-lib';
 import { env, limits } from '../config/env.js';
 import { PdfBatch } from '../models/PdfBatch.js';
@@ -51,8 +52,60 @@ const parseRgb = (color = '#000000') => {
 
 const numberOr = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
 
+const normalizePdfName = (value) => {
+  const name = String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '').slice(0, 180);
+  if (!name) throw new AppError('File name is required', 400, 'file_name_required');
+  return /\.pdf$/i.test(name) ? name : `${name}.pdf`;
+};
+
 const cleanupTempUploads = async (files = []) => {
   await Promise.all(files.map((file) => fs.unlink(file.path).catch(() => {})));
+};
+
+const createPdfFileRecords = async ({ files, batch, userId }) => {
+  for (const file of files) {
+    if (file.size > limits.maxPdfBytes) {
+      await cleanupTempUploads(files);
+      throw new AppError('File too large', 400, 'file_too_large');
+    }
+  }
+
+  const limitFileWork = pLimit(env.pdfFileConcurrency);
+  const createdFiles = await Promise.all(
+    files.map((file) =>
+      limitFileWork(async () => {
+        const hash = await hashFile(file.path);
+        const artifact = await storage.putUploadedFile(file, 'originals', file.originalname);
+
+        return PdfFile.create({
+          userId,
+          batchId: batch._id,
+          originalName: file.originalname,
+          safeName: artifact.safeName,
+          mimeType: file.mimetype,
+          sizeBytes: file.size,
+          originalHash: hash,
+          originalKey: artifact.key
+        });
+      })
+    )
+  );
+  return createdFiles;
+};
+
+const rebuildManualArtifactsSoon = (batchId) => {
+  setImmediate(async () => {
+    try {
+      await buildBatchReport(batchId);
+      await createBatchZip(batchId);
+      await emitBatchStatus(batchId);
+    } catch (error) {
+      await PdfBatch.findByIdAndUpdate(batchId, {
+        failureReason: `Manual artifacts failed: ${error.message}`
+      }).catch(() => {});
+      await emitBatchStatus(batchId).catch(() => {});
+    }
+  });
 };
 
 export const uploadBatch = asyncHandler(async (req, res) => {
@@ -76,25 +129,7 @@ export const uploadBatch = asyncHandler(async (req, res) => {
     totalFiles: files.length
   });
 
-  const createdFiles = [];
-  for (const file of files) {
-    if (file.size > limits.maxPdfBytes) throw new AppError('File too large', 400, 'file_too_large');
-    const hash = await hashFile(file.path);
-    const artifact = await storage.putUploadedFile(file, 'originals', file.originalname);
-
-    createdFiles.push(
-      await PdfFile.create({
-        userId: req.user._id,
-        batchId: batch._id,
-        originalName: file.originalname,
-        safeName: artifact.safeName,
-        mimeType: file.mimetype,
-        sizeBytes: file.size,
-        originalHash: hash,
-        originalKey: artifact.key
-      })
-    );
-  }
+  const createdFiles = await createPdfFileRecords({ files, batch, userId: req.user._id });
 
   // Create audit log for batch upload
   await AuditLog.create({
@@ -108,6 +143,47 @@ export const uploadBatch = asyncHandler(async (req, res) => {
   });
 
   res.status(201).json({ batch, files: createdFiles });
+});
+
+export const addFilesToBatch = asyncHandler(async (req, res) => {
+  const batch = await getOwnedBatch(req.params.batchId, req.user._id);
+  if (['queued', 'processing'].includes(batch.status)) {
+    await cleanupTempUploads(req.files || []);
+    throw new AppError('Cannot add files while this batch is processing', 409, 'batch_processing');
+  }
+
+  const files = req.files || [];
+  if (!files.length) throw new AppError('Upload at least one PDF', 400, 'no_files');
+  const existingCount = await PdfFile.countDocuments({ batchId: batch._id });
+  if (existingCount + files.length > limits.maxPdfsPerBatch) {
+    await cleanupTempUploads(files);
+    throw new AppError(`Maximum ${limits.maxPdfsPerBatch} PDFs are allowed`, 400, 'batch_limit_exceeded');
+  }
+
+  const createdFiles = await createPdfFileRecords({ files, batch, userId: req.user._id });
+  const totalFiles = existingCount + createdFiles.length;
+  const editedFiles = await PdfFile.countDocuments({ batchId: batch._id, editedKey: { $exists: true } });
+  const updatedBatch = await PdfBatch.findByIdAndUpdate(
+    batch._id,
+    {
+      totalFiles,
+      editedFiles,
+      $unset: { zipKey: 1, reportJsonKey: 1, reportCsvKey: 1 }
+    },
+    { new: true }
+  );
+
+  await AuditLog.create({
+    userId: req.user._id,
+    batchId: batch._id,
+    action: 'batch.files_added',
+    metadata: {
+      fileName: batch.name,
+      fileCount: createdFiles.length
+    }
+  });
+
+  res.status(201).json({ batch: updatedBatch, files: createdFiles });
 });
 
 export const listBatches = asyncHandler(async (req, res) => {
@@ -259,8 +335,30 @@ export const getBatchFilePdf = asyncHandler(async (req, res) => {
   const key = variant === 'edited' ? file.editedKey : file.originalKey;
   const pdfPath = await storage.resolvePath(key);
   res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('Content-Disposition', `inline; filename="${variant}-${file.safeName}"`);
   res.sendFile(path.resolve(pdfPath));
+});
+
+export const renameBatchFile = asyncHandler(async (req, res) => {
+  const batch = await getOwnedBatch(req.params.batchId, req.user._id);
+  const file = await PdfFile.findOne({ _id: req.params.fileId, batchId: batch._id, userId: req.user._id });
+  if (!file) throw new AppError('File not found', 404, 'file_not_found');
+
+  const originalName = normalizePdfName(req.body.name);
+  const updatedFile = await PdfFile.findByIdAndUpdate(file._id, { originalName }, { new: true });
+
+  await AuditLog.create({
+    userId: req.user._id,
+    batchId: batch._id,
+    action: 'file.renamed',
+    metadata: {
+      from: file.originalName,
+      to: originalName
+    }
+  });
+
+  res.json({ file: updatedFile });
 });
 
 export const saveManualPdfEdits = asyncHandler(async (req, res) => {
@@ -291,8 +389,8 @@ export const saveManualPdfEdits = asyncHandler(async (req, res) => {
     }
 
     if (operation.type === 'text') {
-      const text = String(operation.text || '').replace(/\s+/g, ' ').trim();
-      if (!text) continue;
+      const text = String(operation.text ?? '').replace(/\r\n/g, '\n');
+      if (!text.trim()) continue;
       const size = Math.min(Math.max(numberOr(operation.fontSize, 10), 4), 72);
       page.drawText(text, {
         x,
@@ -322,14 +420,14 @@ export const saveManualPdfEdits = asyncHandler(async (req, res) => {
     storage.deleteKey(batch.reportJsonKey),
     storage.deleteKey(batch.reportCsvKey)
   ]);
+  const editedFiles = await PdfFile.countDocuments({ batchId: batch._id, editedKey: { $exists: true } });
   await PdfBatch.findByIdAndUpdate(batch._id, {
-    $set: { status: 'completed_with_warnings' },
+    $set: { status: 'completed_with_warnings', editedFiles, completedAt: new Date() },
     $unset: { zipKey: 1, reportJsonKey: 1, reportCsvKey: 1 }
   });
-  await buildBatchReport(batch._id);
-  await createBatchZip(batch._id);
   await emitBatchStatus(batch._id);
-  res.json({ file: updatedFile, editedKey: artifact.key });
+  rebuildManualArtifactsSoon(batch._id);
+  res.json({ file: updatedFile, editedKey: artifact.key, artifactsRebuilding: true });
 });
 
 export const getBatchReport = asyncHandler(async (req, res) => {
@@ -366,8 +464,3 @@ export const deleteBatch = asyncHandler(async (req, res) => {
   await fs.rm(path.join('storage', String(batch._id)), { recursive: true, force: true }).catch(() => {});
   res.status(204).send();
 });
-
-
-
-
-

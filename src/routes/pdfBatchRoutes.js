@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   addRules,
+  addFilesToBatch,
   analyzeBatch,
   deleteBatch,
   downloadZip,
@@ -14,6 +15,7 @@ import {
   processBatch,
   listBatches,
   resumeBatch,
+  renameBatchFile,
   saveManualPdfEdits,
   cancelBatch,
   uploadBatch
@@ -28,6 +30,7 @@ export const pdfBatchRoutes = Router();
 pdfBatchRoutes.use(requireAuth);
 pdfBatchRoutes.get('/', listBatches);
 pdfBatchRoutes.post('/upload', uploadPdfs, uploadBatch);
+pdfBatchRoutes.post('/:batchId/files', uploadPdfs, addFilesToBatch);
 pdfBatchRoutes.post('/:batchId/rules', validate(createRulesSchema), addRules);
 pdfBatchRoutes.post('/:batchId/analyze', analyzeBatch);
 pdfBatchRoutes.post('/:batchId/process', processBatch);
@@ -38,6 +41,7 @@ pdfBatchRoutes.get('/:batchId', getBatch);
 pdfBatchRoutes.get('/:batchId/status', getBatchStatus);
 pdfBatchRoutes.get('/:batchId/files', getBatchFiles);
 pdfBatchRoutes.get('/:batchId/files/:fileId/:variant', getBatchFilePdf);
+pdfBatchRoutes.patch('/:batchId/files/:fileId', renameBatchFile);
 pdfBatchRoutes.post('/:batchId/files/:fileId/manual-edits', saveManualPdfEdits);
 pdfBatchRoutes.get('/:batchId/results', getBatchResults);
 pdfBatchRoutes.get('/:batchId/download-zip', downloadZip);

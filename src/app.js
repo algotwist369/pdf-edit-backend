@@ -10,6 +10,7 @@ import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { authRoutes } from './routes/authRoutes.js';
 import { pdfBatchRoutes } from './routes/pdfBatchRoutes.js';
 import auditLogRoutes from './routes/auditLogRoutes.js';
+import mongoose from 'mongoose';
 
 export const app = express();
 
@@ -35,6 +36,10 @@ app.use(
 );
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/ready', (_req, res) => {
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({ ok: ready, db: ready ? 'connected' : 'disconnected' });
+});
 app.use('/api/auth', authRoutes);
 app.use('/api/pdf-batches', pdfBatchRoutes);
 app.use('/api/audit-logs', auditLogRoutes);

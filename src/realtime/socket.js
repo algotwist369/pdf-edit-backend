@@ -12,6 +12,9 @@ import { setIoInstance, getIoInstance } from './socketInstance.js';
 
 // Track active user connections
 const activeUsers = new Map(); // userId -> Set of socket IDs
+const logSocket = (...args) => {
+  if (env.nodeEnv !== 'production') console.log(...args);
+};
 
 export const getActiveUsers = () => activeUsers;
 
@@ -46,13 +49,13 @@ export const initRealtime = async (httpServer) => {
   });
 
   io.on('connection', (socket) => {
-    console.log('[Socket] New client connected:', { userId: socket.userId, role: socket.userRole });
+    logSocket('[Socket] New client connected:', { userId: socket.userId, role: socket.userRole });
     
     // Add user to active users
     if (socket.userId) {
       if (!activeUsers.has(socket.userId)) {
         activeUsers.set(socket.userId, new Set());
-        console.log('[Socket] User came online:', socket.userId);
+        logSocket('[Socket] User came online:', socket.userId);
         // User just came online
         io.to('audit-logs').emit('user:status-change', {
           userId: socket.userId,
@@ -60,11 +63,11 @@ export const initRealtime = async (httpServer) => {
         });
       }
       activeUsers.get(socket.userId).add(socket.id);
-      console.log('[Socket] Active users:', Array.from(activeUsers.keys()));
+      logSocket('[Socket] Active users:', Array.from(activeUsers.keys()));
     }
 
     socket.on('batch:join', async ({ batchId }) => {
-      console.log('[Socket] batch:join event received:', { batchId, userId: socket.userId });
+      logSocket('[Socket] batch:join event received:', { batchId, userId: socket.userId });
       const batch = await PdfBatch.findById(batchId).select('userId');
       if (!batch || String(batch.userId) !== String(socket.userId)) return;
       socket.join(`batch:${batchId}`);
@@ -72,32 +75,32 @@ export const initRealtime = async (httpServer) => {
     });
 
     socket.on('batch:leave', ({ batchId }) => {
-      console.log('[Socket] batch:leave event received:', { batchId, userId: socket.userId });
+      logSocket('[Socket] batch:leave event received:', { batchId, userId: socket.userId });
       socket.leave(`batch:${batchId}`);
     });
 
     // Let admins join audit logs room
     if (socket.userRole === 'admin') {
       socket.join('audit-logs');
-      console.log('[Socket] Admin joined audit-logs room:', socket.userId);
+      logSocket('[Socket] Admin joined audit-logs room:', socket.userId);
     }
 
     // Send current active users to new admin
     if (socket.userRole === 'admin') {
       const onlineUsers = Array.from(activeUsers.keys());
       socket.emit('users:initial-status', onlineUsers);
-      console.log('[Socket] Sent initial online users to admin:', onlineUsers);
+      logSocket('[Socket] Sent initial online users to admin:', onlineUsers);
     }
 
     socket.on('disconnect', () => {
-      console.log('[Socket] Client disconnected:', { userId: socket.userId, role: socket.userRole });
+      logSocket('[Socket] Client disconnected:', { userId: socket.userId, role: socket.userRole });
       if (socket.userId) {
         const userSockets = activeUsers.get(socket.userId);
         if (userSockets) {
           userSockets.delete(socket.id);
           if (userSockets.size === 0) {
             activeUsers.delete(socket.userId);
-            console.log('[Socket] User went offline:', socket.userId);
+            logSocket('[Socket] User went offline:', socket.userId);
             // User went offline
             io.to('audit-logs').emit('user:status-change', {
               userId: socket.userId,
@@ -106,7 +109,7 @@ export const initRealtime = async (httpServer) => {
           }
         }
       }
-      console.log('[Socket] Active users after disconnect:', Array.from(activeUsers.keys()));
+      logSocket('[Socket] Active users after disconnect:', Array.from(activeUsers.keys()));
     });
   });
 
@@ -129,10 +132,10 @@ export const emitBatchStatus = async (batchId, target = getIoInstance()) => {
 export const emitAuditLog = async (log) => {
   const io = getIoInstance();
   if (!io) {
-    console.log('[Socket] emitAuditLog failed: io instance not available');
+    logSocket('[Socket] emitAuditLog failed: io instance not available');
     return;
   }
-  console.log('[Socket] Emitting audit log to audit-logs room:', { logId: log._id, action: log.action });
+  logSocket('[Socket] Emitting audit log to audit-logs room:', { logId: log._id, action: log.action });
   // Populate user info
   const populatedLog = await log.populate('userId', 'name email');
   const batch = await PdfBatch.findById(log.batchId);
@@ -145,6 +148,5 @@ export const emitAuditLog = async (log) => {
     isUserOnline
   };
   io.to('audit-logs').emit('audit-log:new', eventPayload);
-  console.log('[Socket] Audit log emitted successfully');
+  logSocket('[Socket] Audit log emitted successfully');
 };
-
